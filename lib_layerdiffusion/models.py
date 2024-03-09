@@ -3,6 +3,7 @@ import torch
 import cv2
 import numpy as np
 
+from PIL import Image
 from tqdm import tqdm
 from typing import Optional, Tuple
 from diffusers.configuration_utils import ConfigMixin, register_to_config
@@ -10,6 +11,9 @@ from diffusers.models.modeling_utils import ModelMixin
 from diffusers.models.unet_2d_blocks import UNetMidBlock2D, get_down_block, get_up_block
 import ldm_patched.modules.model_management as model_management
 from ldm_patched.modules.model_patcher import ModelPatcher
+
+from modules import images, processing
+from modules.shared import opts
 
 
 def zero_module(module):
@@ -41,7 +45,8 @@ class LatentTransparencyOffsetEncoder(torch.nn.Module):
             nn.SiLU(),
             torch.nn.Conv2d(256, 256, kernel_size=3, padding=1, stride=1),
             nn.SiLU(),
-            zero_module(torch.nn.Conv2d(256, 4, kernel_size=3, padding=1, stride=1)),
+            zero_module(torch.nn.Conv2d(
+                256, 4, kernel_size=3, padding=1, stride=1)),
         )
 
     def __call__(self, x):
@@ -55,8 +60,10 @@ class UNet1024(ModelMixin, ConfigMixin):
         self,
         in_channels: int = 3,
         out_channels: int = 3,
-        down_block_types: Tuple[str] = ("DownBlock2D", "DownBlock2D", "DownBlock2D", "DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
-        up_block_types: Tuple[str] = ("AttnUpBlock2D", "AttnUpBlock2D", "AttnUpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D"),
+        down_block_types: Tuple[str] = ("DownBlock2D", "DownBlock2D", "DownBlock2D",
+                                        "DownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D", "AttnDownBlock2D"),
+        up_block_types: Tuple[str] = ("AttnUpBlock2D", "AttnUpBlock2D",
+                                      "AttnUpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D"),
         block_out_channels: Tuple[int] = (32, 32, 64, 128, 256, 512, 512),
         layers_per_block: int = 2,
         mid_block_scale_factor: float = 1,
@@ -72,8 +79,10 @@ class UNet1024(ModelMixin, ConfigMixin):
         super().__init__()
 
         # input
-        self.conv_in = nn.Conv2d(in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1))
-        self.latent_conv_in = zero_module(nn.Conv2d(4, block_out_channels[2], kernel_size=1))
+        self.conv_in = nn.Conv2d(
+            in_channels, block_out_channels[0], kernel_size=3, padding=(1, 1))
+        self.latent_conv_in = zero_module(
+            nn.Conv2d(4, block_out_channels[2], kernel_size=1))
 
         self.down_blocks = nn.ModuleList([])
         self.mid_block = None
@@ -125,7 +134,8 @@ class UNet1024(ModelMixin, ConfigMixin):
         for i, up_block_type in enumerate(up_block_types):
             prev_output_channel = output_channel
             output_channel = reversed_block_out_channels[i]
-            input_channel = reversed_block_out_channels[min(i + 1, len(block_out_channels) - 1)]
+            input_channel = reversed_block_out_channels[min(
+                i + 1, len(block_out_channels) - 1)]
 
             is_final_block = i == len(block_out_channels) - 1
 
@@ -149,9 +159,11 @@ class UNet1024(ModelMixin, ConfigMixin):
             prev_output_channel = output_channel
 
         # out
-        self.conv_norm_out = nn.GroupNorm(num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps)
+        self.conv_norm_out = nn.GroupNorm(
+            num_channels=block_out_channels[0], num_groups=norm_num_groups, eps=norm_eps)
         self.conv_act = nn.SiLU()
-        self.conv_out = nn.Conv2d(block_out_channels[0], out_channels, kernel_size=3, padding=1)
+        self.conv_out = nn.Conv2d(
+            block_out_channels[0], out_channels, kernel_size=3, padding=1)
 
     def forward(self, x, latent):
         sample_latent = self.latent_conv_in(latent)
@@ -163,14 +175,16 @@ class UNet1024(ModelMixin, ConfigMixin):
             if i == 3:
                 sample = sample + sample_latent
 
-            sample, res_samples = downsample_block(hidden_states=sample, temb=emb)
+            sample, res_samples = downsample_block(
+                hidden_states=sample, temb=emb)
             down_block_res_samples += res_samples
 
         sample = self.mid_block(sample, emb)
 
         for upsample_block in self.up_blocks:
-            res_samples = down_block_res_samples[-len(upsample_block.resnets) :]
-            down_block_res_samples = down_block_res_samples[: -len(upsample_block.resnets)]
+            res_samples = down_block_res_samples[-len(upsample_block.resnets):]
+            down_block_res_samples = down_block_res_samples[: -len(
+                upsample_block.resnets)]
             sample = upsample_block(sample, res_samples, emb)
 
         sample = self.conv_norm_out(sample)
@@ -187,14 +201,16 @@ class TransparentVAEDecoder:
     def __init__(self, sd, mod_number=1):
         self.load_device = model_management.get_torch_device()
         self.offload_device = model_management.unet_offload_device()
-        self.dtype = torch.float16 if model_management.should_use_fp16(self.load_device) else torch.float32
+        self.dtype = torch.float16 if model_management.should_use_fp16(
+            self.load_device) else torch.float32
 
         model = UNet1024(in_channels=3, out_channels=4)
         model.load_state_dict(sd, strict=True)
         model.to(device=self.offload_device, dtype=self.dtype)
         model.eval()
 
-        self.model = ModelPatcher(model, load_device=self.load_device, offload_device=self.offload_device)
+        self.model = ModelPatcher(
+            model, load_device=self.load_device, offload_device=self.offload_device)
         self.mod_number = mod_number
         return
 
@@ -206,7 +222,8 @@ class TransparentVAEDecoder:
     @torch.no_grad()
     def estimate_augmented(self, pixel, latent):
         args = [
-            [False, 0], [False, 1], [False, 2], [False, 3], [True, 0], [True, 1], [True, 2], [True, 3],
+            [False, 0], [False, 1], [False, 2], [False, 3], [
+                True, 0], [True, 1], [True, 2], [True, 3],
         ]
 
         result = []
@@ -237,10 +254,12 @@ class TransparentVAEDecoder:
     def patch(self, p, vae_patcher, output_origin):
         @torch.no_grad()
         def wrapper(func, latent):
-            pixel = func(latent).movedim(-1, 1).to(device=self.load_device, dtype=self.dtype)
+            pixel = func(latent).movedim(-1,
+                                         1).to(device=self.load_device, dtype=self.dtype)
 
             if output_origin:
-                origin_outputs = (pixel.movedim(1, -1) * 255.0).detach().cpu().float().numpy().clip(0, 255).astype(np.uint8)
+                origin_outputs = (pixel.movedim(
+                    1, -1) * 255.0).detach().cpu().float().numpy().clip(0, 255).astype(np.uint8)
                 for png in origin_outputs:
                     p.extra_result_images.append(png)
 
@@ -269,7 +288,25 @@ class TransparentVAEDecoder:
                 vis_list.append(vis)
 
                 png = torch.cat([fg, alpha], dim=3)[0]
-                png = (png * 255.0).detach().cpu().float().numpy().clip(0, 255).astype(np.uint8)
+                png = (png * 255.0).detach().cpu().float().numpy().clip(0,
+                                                                        255).astype(np.uint8)
+
+                # Save transparent image code.
+                xpng = Image.fromarray(png)
+                infotext = processing.Processed(p, []).infotext(p, i)
+                if getattr(opts, 'layerdiffusion_save_transparent_images', False):
+                    images.save_image(
+                        image=xpng,
+                        path=p.outpath_samples,
+                        basename="",
+                        seed=p.seeds[i],
+                        prompt=p.prompts[i],
+                        extension=getattr(opts, 'samples_format', 'png'),
+                        info=infotext,
+                        p=p,
+                        suffix="-transparent"
+                    )
+
                 p.extra_result_images.append(png)
 
             vis_list = torch.cat(vis_list, dim=0)
@@ -283,14 +320,16 @@ class TransparentVAEEncoder:
     def __init__(self, sd):
         self.load_device = model_management.get_torch_device()
         self.offload_device = model_management.unet_offload_device()
-        self.dtype = torch.float16 if model_management.should_use_fp16(self.load_device) else torch.float32
+        self.dtype = torch.float16 if model_management.should_use_fp16(
+            self.load_device) else torch.float32
 
         model = LatentTransparencyOffsetEncoder()
         model.load_state_dict(sd, strict=True)
         model.to(device=self.offload_device, dtype=self.dtype)
         model.eval()
 
-        self.model = ModelPatcher(model, load_device=self.load_device, offload_device=self.offload_device)
+        self.model = ModelPatcher(
+            model, load_device=self.load_device, offload_device=self.offload_device)
         return
 
     def patch(self, p, vae_patcher):
@@ -304,4 +343,3 @@ class TransparentVAEEncoder:
 
         vae_patcher.set_model_vae_encode_wrapper(wrapper)
         return
-
