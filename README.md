@@ -1,3 +1,7 @@
+## Save Transparent image paramater
+
+2024/3/9 Check "Save images with transparency" on the "Settings" tab. (Unchecked by default)
+
 # sd-forge-layerdiffuse
 
 Transparent Image Layer Diffusion using Latent Transparency
