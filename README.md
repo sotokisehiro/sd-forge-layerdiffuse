@@ -2,6 +2,8 @@
 
 2024/3/9 Check "Save images with transparency" on the "Settings" tab. (Unchecked by default)
 
+2024/3/9 「設定」タブの「画像を透過して保存する」にチェックを入れてください。 (デフォルトではチェックが入っていません)
+
 # sd-forge-layerdiffuse
 
 Transparent Image Layer Diffusion using Latent Transparency
